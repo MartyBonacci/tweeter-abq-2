@@ -1,0 +1,739 @@
+openapi: 3.1.0
+
+info:
+  title: Tweeter API
+  version: 1.0.0
+  description: |
+    REST API for Tweeter, a simplified Twitter clone styled like the 140-character era.
+
+    Built with an API-first architecture: page routes consume this API via internal
+    `fetch()` calls, proving the contract before any mobile client is built. All
+    business logic flows through these `/api/v1/*` endpoints.
+
+    **Authentication** supports two methods — cookie-based sessions for web clients
+    and bearer tokens for mobile/external clients. Both resolve to the same user
+    profile. Auth endpoints set the session cookie AND return a bearer token in the
+    JSON body so a single request serves both flows.
+
+servers:
+  - url: https://tweeter-abq-2.vercel.app
+    description: Vercel production
+  - url: http://localhost:5173
+    description: Local development
+
+# ── Security schemes ──────────────────────────────────────────
+
+security: []
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: __tweeter_session
+      description: |
+        Cookie-based session set by the signup/signin endpoints.
+        The cookie is HttpOnly, SameSite=Lax, and Secure in production.
+        Contains the authenticated user's profile ID.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Bearer token passed via the `Authorization: Bearer <token>` header.
+        In this simplified implementation the token is the user's profile ID
+        (a UUIDv7). The API checks for a bearer token first, then falls back
+        to the cookie session.
+
+  # ── Reusable schemas ──────────────────────────────────────
+
+  schemas:
+    Profile:
+      type: object
+      description: A user profile.
+      required: [id, username, email, bio, avatarUrl, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: UUIDv7 identifier.
+          example: "019508a1-b8c0-7d1e-9a3f-4b2c1d6e8f0a"
+        username:
+          type: string
+          minLength: 3
+          maxLength: 20
+          pattern: "^[a-zA-Z0-9_]+$"
+          example: "jane_doe"
+        email:
+          type: string
+          format: email
+          example: "jane@example.com"
+        bio:
+          type: ["string", "null"]
+          maxLength: 160
+          example: "Tweeting about tech and tacos."
+        avatarUrl:
+          type: ["string", "null"]
+          format: uri
+          example: "https://res.cloudinary.com/demo/image/upload/v1/avatars/abc123.jpg"
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-02-12T18:30:00.000Z"
+
+    Tweet:
+      type: object
+      description: A tweet with author info and like metadata.
+      required: [id, profileId, content, createdAt, username, avatarUrl, likeCount, isLiked]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: UUIDv7 identifier.
+        profileId:
+          type: string
+          format: uuid
+          description: Author's profile ID.
+        content:
+          type: string
+          minLength: 1
+          maxLength: 140
+          example: "Hello world! This is my first tweet."
+        createdAt:
+          type: string
+          format: date-time
+        username:
+          type: string
+          description: Author's username (joined from profiles).
+        avatarUrl:
+          type: ["string", "null"]
+          description: Author's avatar URL (joined from profiles).
+        likeCount:
+          type: integer
+          minimum: 0
+          description: Total number of likes on this tweet.
+        isLiked:
+          type: boolean
+          description: Whether the requesting user has liked this tweet.
+
+    NewTweet:
+      type: object
+      description: A newly created tweet (INSERT result, no join data).
+      required: [id, profileId, content, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        profileId:
+          type: string
+          format: uuid
+        content:
+          type: string
+          minLength: 1
+          maxLength: 140
+        createdAt:
+          type: string
+          format: date-time
+
+    SignupRequest:
+      type: object
+      required: [username, email, password]
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 20
+          pattern: "^[a-zA-Z0-9_]+$"
+          description: "Letters, numbers, and underscores only."
+          example: "jane_doe"
+        email:
+          type: string
+          format: email
+          description: "Must be a valid email address."
+          example: "jane@example.com"
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+          description: "Must be at least 8 characters."
+          example: "s3cur3Pa$$"
+
+    SigninRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          description: "Must be a valid email address."
+          example: "jane@example.com"
+        password:
+          type: string
+          minLength: 1
+          description: "Password is required."
+          example: "s3cur3Pa$$"
+
+    TweetRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 140
+          description: "Tweet cannot be empty. Must be 140 characters or less."
+          example: "Hello world! This is my first tweet."
+
+    ProfileEditRequest:
+      type: object
+      properties:
+        bio:
+          type: string
+          maxLength: 160
+          description: "Bio must be 160 characters or less. May be empty string or omitted."
+          example: "Tweeting about tech and tacos."
+
+    LikeToggleResult:
+      type: object
+      required: [liked, likeCount]
+      properties:
+        liked:
+          type: boolean
+          description: "`true` if the tweet is now liked, `false` if unliked."
+        likeCount:
+          type: integer
+          minimum: 0
+          description: Updated total like count for the tweet.
+
+    ValidationError:
+      type: object
+      description: Returned when Zod validation fails (400).
+      required: [error, issues]
+      properties:
+        error:
+          type: string
+          example: "Validation failed"
+        issues:
+          type: object
+          description: "Field-level errors from `ZodError.flatten().fieldErrors`."
+          additionalProperties:
+            type: array
+            items:
+              type: string
+          example:
+            username: ["Username must be at least 3 characters"]
+            email: ["Please enter a valid email address"]
+
+    AuthUser:
+      type: object
+      description: |
+        The authenticated user — a subset of Profile returned by the auth
+        layer. Does not include `createdAt`.
+      required: [id, username, email, bio, avatarUrl]
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        email:
+          type: string
+          format: email
+        bio:
+          type: ["string", "null"]
+        avatarUrl:
+          type: ["string", "null"]
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: "Unauthorized"
+
+# ── Paths ─────────────────────────────────────────────────────
+
+paths:
+  # ── Auth ──────────────────────────────────────────────────
+
+  /api/v1/auth/signup:
+    post:
+      summary: Create a new account
+      description: |
+        Register a new user. Returns the profile and a bearer token.
+        Also sets the `__tweeter_session` cookie so web clients are
+        logged in immediately.
+      operationId: signup
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignupRequest"
+      responses:
+        "201":
+          description: Account created successfully.
+          headers:
+            Set-Cookie:
+              description: Session cookie for web clients.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [profile, token]
+                properties:
+                  profile:
+                    $ref: "#/components/schemas/Profile"
+                  token:
+                    type: string
+                    description: Bearer token (profile ID in this simplified implementation).
+        "400":
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+        "405":
+          description: Method not allowed (only POST accepted).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Username or email already taken.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "Username or email already taken"
+        "500":
+          description: Server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/auth/signin:
+    post:
+      summary: Authenticate with email and password
+      description: |
+        Sign in an existing user. Returns the profile and a bearer token.
+        Also sets the `__tweeter_session` cookie for web clients.
+      operationId: signin
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SigninRequest"
+      responses:
+        "200":
+          description: Authenticated successfully.
+          headers:
+            Set-Cookie:
+              description: Session cookie for web clients.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [profile, token]
+                properties:
+                  profile:
+                    $ref: "#/components/schemas/Profile"
+                  token:
+                    type: string
+                    description: Bearer token for subsequent requests.
+        "400":
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+        "401":
+          description: Invalid email or password.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "Invalid email or password"
+        "405":
+          description: Method not allowed (only POST accepted).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/auth/signout:
+    post:
+      summary: Sign out (destroy session)
+      description: |
+        Destroys the session cookie to log the user out.
+        The `Set-Cookie` header in the response clears the session.
+      operationId: signout
+      tags: [Auth]
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Signed out successfully.
+          headers:
+            Set-Cookie:
+              description: Cleared session cookie.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success]
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+        "405":
+          description: Method not allowed (only POST accepted).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ── Tweets ────────────────────────────────────────────────
+
+  /api/v1/tweets:
+    get:
+      summary: Get the tweet feed
+      description: |
+        Returns all tweets (newest first, max 50) with author info
+        and like metadata for the authenticated user.
+      operationId: getFeed
+      tags: [Tweets]
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Tweet feed loaded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tweets, user]
+                properties:
+                  tweets:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Tweet"
+                  user:
+                    $ref: "#/components/schemas/AuthUser"
+        "401":
+          description: Not authenticated.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Unauthorized"
+
+    post:
+      summary: Create a tweet
+      description: |
+        Post a new tweet (140-character maximum). Returns the newly
+        created tweet row.
+      operationId: createTweet
+      tags: [Tweets]
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TweetRequest"
+      responses:
+        "201":
+          description: Tweet created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tweet]
+                properties:
+                  tweet:
+                    $ref: "#/components/schemas/NewTweet"
+        "400":
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+        "401":
+          description: Not authenticated.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Unauthorized"
+        "405":
+          description: Method not allowed (only POST accepted).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/tweets/{id}:
+    delete:
+      summary: Delete a tweet
+      description: |
+        Delete a tweet by ID. Only the tweet owner can delete their own
+        tweets. Also accepts POST with a `_method=DELETE` form field for
+        progressive enhancement (HTML forms only support GET/POST).
+      operationId: deleteTweet
+      tags: [Tweets]
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: UUIDv7 tweet identifier.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Tweet deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success]
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+        "401":
+          description: Not authenticated.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Unauthorized"
+        "404":
+          description: Tweet not found or not owned by the authenticated user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "Tweet not found or not authorized"
+        "405":
+          description: Method not allowed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ── Likes ─────────────────────────────────────────────────
+
+  /api/v1/tweets/{id}/like:
+    post:
+      summary: Toggle like on a tweet
+      description: |
+        If the authenticated user has already liked the tweet, the like
+        is removed. Otherwise a like is added. Returns the new like state
+        and updated count.
+      operationId: toggleLike
+      tags: [Likes]
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: UUIDv7 tweet identifier.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Like toggled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LikeToggleResult"
+        "401":
+          description: Not authenticated.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Unauthorized"
+        "405":
+          description: Method not allowed (only POST accepted).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ── Profiles ──────────────────────────────────────────────
+
+  /api/v1/profiles/{username}:
+    get:
+      summary: Get a user's profile and tweets
+      description: |
+        Returns a user's public profile and their tweets (newest first,
+        max 50). Authentication is optional — unauthenticated users can
+        view profiles but `isLiked` will always be `false` on tweets.
+      operationId: getProfile
+      tags: [Profiles]
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - {}
+      parameters:
+        - name: username
+          in: path
+          required: true
+          description: The user's unique username.
+          schema:
+            type: string
+            minLength: 3
+            maxLength: 20
+          example: "jane_doe"
+      responses:
+        "200":
+          description: Profile and tweets loaded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [profile, tweets, currentUser]
+                properties:
+                  profile:
+                    $ref: "#/components/schemas/Profile"
+                  tweets:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Tweet"
+                  currentUser:
+                    oneOf:
+                      - $ref: "#/components/schemas/AuthUser"
+                      - type: "null"
+                    description: The authenticated user, or null if not logged in.
+        "404":
+          description: Profile not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "Profile not found"
+
+    patch:
+      summary: Update own profile
+      description: |
+        Update the authenticated user's bio and/or avatar. Only the profile
+        owner can update their own profile (or use the `me` alias).
+
+        Accepts two content types:
+        - `application/json` for bio-only updates (validated with Zod)
+        - `multipart/form-data` for avatar upload with optional bio
+      operationId: updateProfile
+      tags: [Profiles]
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          description: |
+            The user's own username, or `me` as a shorthand alias.
+          schema:
+            type: string
+          example: "jane_doe"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProfileEditRequest"
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                bio:
+                  type: string
+                  maxLength: 160
+                  description: Updated bio text.
+                avatar:
+                  type: string
+                  format: binary
+                  description: Avatar image file (uploaded to Cloudinary).
+      responses:
+        "200":
+          description: Profile updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [profile]
+                properties:
+                  profile:
+                    $ref: "#/components/schemas/Profile"
+        "400":
+          description: Validation failed (JSON content type only).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+        "401":
+          description: Not authenticated.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Unauthorized"
+        "403":
+          description: Cannot update another user's profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "Forbidden"
+        "405":
+          description: Method not allowed (only PATCH accepted).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+tags:
+  - name: Auth
+    description: Account creation, authentication, and session management.
+  - name: Tweets
+    description: Create, read, and delete tweets.
+  - name: Likes
+    description: Like and unlike tweets.
+  - name: Profiles
+    description: View and update user profiles.
