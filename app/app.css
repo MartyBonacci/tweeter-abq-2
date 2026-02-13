@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+/*
+ * Tweeter — Classic Twitter blue-and-white aesthetic
+ *
+ * Color palette:
+ *   --tweeter-blue:       #1DA1F2  (primary actions, links)
+ *   --tweeter-dark-blue:  #1A91DA  (hover states)
+ *   --tweeter-bg:         #E8F5FD  (page background)
+ *   --tweeter-white:      #FFFFFF  (cards, surfaces)
+ *   --tweeter-gray:       #657786  (secondary text)
+ *   --tweeter-light-gray: #AAB8C2  (borders, placeholders)
+ *   --tweeter-extra-light:#E1E8ED  (dividers)
+ */
+
+@theme {
+  --color-tweeter-blue: #1DA1F2;
+  --color-tweeter-dark-blue: #1A91DA;
+  --color-tweeter-bg: #E8F5FD;
+  --color-tweeter-white: #FFFFFF;
+  --color-tweeter-gray: #657786;
+  --color-tweeter-light-gray: #AAB8C2;
+  --color-tweeter-extra-light: #E1E8ED;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
+  background-color: var(--color-tweeter-bg);
+  color: #14171a;
+}
