@@ -40,7 +40,9 @@ export async function apiFetch<T = unknown>(
   });
 
   if (!response.ok) {
-    throw new Response(response.statusText, { status: response.status });
+    // Throw the actual API response so callers can read the error body
+    // (e.g. validation issues, "Username already taken", etc.)
+    throw response;
   }
 
   const data = (await response.json()) as T;

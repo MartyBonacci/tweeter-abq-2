@@ -41,6 +41,11 @@ export async function action({ request }: Route.ActionArgs) {
     const message =
       error instanceof Error ? error.message : "Signin failed";
 
-    return Response.json({ error: message }, { status: 401 });
+    // Only return 401 for credential errors; everything else is a server error
+    const isAuthError = message === "Invalid email or password";
+    return Response.json(
+      { error: message },
+      { status: isAuthError ? 401 : 500 },
+    );
   }
 }
